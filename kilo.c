@@ -364,25 +364,36 @@ int getWindowSize(int ifd, int ofd, int *rows, int *cols)
 	if (ioctl(1, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
 		/* ioctl() failed. Try to query the terminal itself. */
 		int orig_row, orig_col, retval;
+		struct termios tmp, orig;
+
+		tcgetattr(ifd, &orig);
+		tmp = orig;
+		tmp.c_lflag &= ~(ICANON | ECHO);
+		tcsetattr(ifd, TCSANOW, &tmp);
 
 		/* Get the initial position so we can restore it later. */
 		retval = getCursorPosition(ifd, ofd, &orig_row, &orig_col);
-		if (retval == -1)
+		if (retval == -1) {
+			tcsetattr(ifd, TCSANOW, &orig);
 			goto failed;
-
+		}
 		/* Go to right/bottom margin and get position. */
-		if (write(ofd, "\x1b[999C\x1b[999B", 12) != 12)
+		if (write(ofd, "\x1b[999C\x1b[999B", 12) != 12) {
+			tcsetattr(ifd, TCSANOW, &orig);
 			goto failed;
+		}
 		retval = getCursorPosition(ifd, ofd, rows, cols);
-		if (retval == -1)
+		if (retval == -1) {
+			tcsetattr(ifd, TCSANOW, &orig);
 			goto failed;
-
+		}
 		/* Restore position. */
 		char seq[32];
 		snprintf(seq, 32, "\x1b[%d;%dH", orig_row, orig_col);
 		if (write(ofd, seq, strlen(seq)) == -1) {
 			/* Can't recover... */
 		}
+		tcsetattr(ifd, TCSANOW, &orig);
 		return 0;
 	} else {
 		*cols = ws.ws_col;
