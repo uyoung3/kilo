@@ -977,7 +977,12 @@ void abFree(struct abuf *ab)
 
 /* This function writes the whole screen using VT100 escape characters
  * starting from the logical state of the editor in the global state 'E'. */
-void editorRefreshScreen(void)
+/* Redraw the screen. When 'full' is non-zero the whole frame (text rows +
+ * status bar) is repainted; when zero only the status bar is repainted and the
+ * cursor repositioned, leaving the already-drawn text rows in place. The light
+ * path is valid only when the visible text is unchanged, i.e. a cursor move
+ * that did not scroll the view (see the main loop). */
+void editorRefreshScreen(int full)
 {
 	int y;
 	erow *r;
@@ -985,6 +990,13 @@ void editorRefreshScreen(void)
 	struct abuf ab = ABUF_INIT;
 
 	abAppend(&ab, "\x1b[?25l", 6); /* Hide cursor. */
+	if (!full) {
+		/* Jump straight to the first status row, leaving the text rows
+		 * above untouched. */
+		snprintf(buf, sizeof(buf), "\x1b[%d;1H", E.screenrows + 1);
+		abAppend(&ab, buf, strlen(buf));
+		goto drawstatus;
+	}
 	abAppend(&ab, "\x1b[H", 3); /* Go home. */
 	for (y = 0; y < E.screenrows; y++) {
 		int filerow = E.rowoff + y;
@@ -1051,6 +1063,7 @@ void editorRefreshScreen(void)
 		abAppend(&ab, "\r\n", 2);
 	}
 
+drawstatus:
 	/* Create a two rows status. First row: */
 	abAppend(&ab, "\x1b[0K", 4);
 	abAppend(&ab, "\x1b[7m", 4);
@@ -1139,7 +1152,7 @@ void editorFind(int fd)
 	while (1) {
 		editorSetStatusMessage(
 		        "Search: %s (Use ESC/Arrows/Enter)", query);
-		editorRefreshScreen();
+		editorRefreshScreen(1);
 
 		int c = editorReadKey(fd);
 		if (c == DEL_KEY || c == CTRL_H || c == BACKSPACE) {
@@ -1298,11 +1311,12 @@ void editorMoveCursor(int key)
 /* Process events arriving from the standard input, which is, the user
  * is typing stuff on the terminal. */
 #define KILO_QUIT_TIMES 3
-void editorProcessKeypress(int fd)
+int editorProcessKeypress(int fd)
 {
 	/* When the file is modified, requires Ctrl-q to be pressed N times
 	 * before actually quitting. */
 	static int quit_times = KILO_QUIT_TIMES;
+	int nav = 0; /* Set for pure cursor-navigation keys (no content change). */
 
 	int c = editorReadKey(fd);
 	switch (c) {
@@ -1319,7 +1333,7 @@ void editorProcessKeypress(int fd)
 			editorSetStatusMessage("WARNING!!! File has unsaved changes. "
 			                       "Press Ctrl-Q %d more times to quit.", quit_times);
 			quit_times--;
-			return;
+			return 0;
 		}
 		exit(0);
 		break;
@@ -1346,6 +1360,7 @@ void editorProcessKeypress(int fd)
 				editorMoveCursor(c == PAGE_UP ? ARROW_UP :
 				                 ARROW_DOWN);
 		}
+		nav = 1;
 		break;
 
 	case ARROW_UP:
@@ -1353,6 +1368,7 @@ void editorProcessKeypress(int fd)
 	case ARROW_LEFT:
 	case ARROW_RIGHT:
 		editorMoveCursor(c);
+		nav = 1;
 		break;
 	case CTRL_L: /* ctrl+l, clear screen */
 		/* Just refresht the line as side effect. */
@@ -1366,6 +1382,7 @@ void editorProcessKeypress(int fd)
 	}
 
 	quit_times = KILO_QUIT_TIMES; /* Reset it to the original value. */
+	return nav;
 }
 
 int editorFileWasModified(void)
@@ -1390,7 +1407,7 @@ void handleSigWinCh(int unused __attribute__((unused)))
 		E.cy = E.screenrows - 1;
 	if (E.cx > E.screencols)
 		E.cx = E.screencols - 1;
-	editorRefreshScreen();
+	editorRefreshScreen(1);
 }
 
 void initEditor(void)
@@ -1421,9 +1438,16 @@ int main(int argc, char **argv)
 	enableRawMode(STDIN_FILENO);
 	editorSetStatusMessage(
 	        "HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
+	editorRefreshScreen(1); /* Initial full draw. */
 	while (1) {
-		editorRefreshScreen();
-		editorProcessKeypress(STDIN_FILENO);
+		int prev_rowoff = E.rowoff, prev_coloff = E.coloff;
+		int nav = editorProcessKeypress(STDIN_FILENO);
+		/* If the keypress only moved the cursor without scrolling the
+		 * view, the visible text rows are still valid: do a light refresh
+		 * that only repaints the status bar and repositions the cursor. */
+		int full = !(nav && E.rowoff == prev_rowoff &&
+		             E.coloff == prev_coloff);
+		editorRefreshScreen(full);
 	}
 	return 0;
 }
