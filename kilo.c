@@ -53,6 +53,11 @@
 #include <stdarg.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <search.h>
+
+#ifndef __COMPAR_FN_T
+typedef int (*__compar_fn_t)(const void *, const void *);
+#endif
 
 /* Syntax highlight types */
 #define HL_NORMAL 0
@@ -69,8 +74,9 @@
 #define HL_HIGHLIGHT_NUMBERS (1<<1)
 
 struct editorSyntax {
-	char **filematch;
-	char **keywords;
+	const char **filematch;
+	const char **keywords;
+	void *keywords_root;
 	char singleline_comment_start[2];
 	char multiline_comment_start[3];
 	char multiline_comment_end[3];
@@ -119,7 +125,7 @@ enum KEY_ACTION {
 	CTRL_H = 8,         /* Ctrl-h */
 	TAB = 9,            /* Tab */
 	CTRL_L = 12,        /* Ctrl+l */
-	ENTER = 13,         /* Enter */
+	ENTRE = 13,         /* Enter */
 	CTRL_Q = 17,        /* Ctrl-q */
 	CTRL_S = 19,        /* Ctrl-s */
 	CTRL_U = 21,        /* Ctrl-u */
@@ -162,8 +168,8 @@ void editorSetStatusMessage(const char *fmt, ...);
  * There is no support to highlight patterns currently. */
 
 /* C / C++ */
-char *C_HL_extensions[] = {".c", ".h", ".cpp", ".hpp", ".cc", NULL};
-char *C_HL_keywords[] = {
+static const char *C_HL_extensions[] = {".c", ".h", ".cpp", ".hpp", ".cc", NULL};
+static const char *C_HL_keywords[] = {
 	/* C Keywords */
 	"auto", "break", "case", "continue", "default", "do", "else", "enum",
 	"extern", "for", "goto", "if", "register", "return", "sizeof", "static",
@@ -179,8 +185,8 @@ char *C_HL_keywords[] = {
 	"typeid", "typename", "virtual", "xor", "xor_eq",
 
 	/* C types */
-	"int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
-	"void|", "short|", "auto|", "const|", "bool|", NULL
+	"\0int", "\0long", "\0double", "\0float", "\0char", "\0unsigned", "\0signed",
+	"\0void", "\0short", "\0auto", "\0const", "\0bool", NULL
 };
 
 /* Here we define an array of syntax highlights by extensions, keywords,
@@ -190,6 +196,7 @@ struct editorSyntax HLDB[] = {
 		/* C / C++ */
 		C_HL_extensions,
 		C_HL_keywords,
+		NULL,
 		"//", "/*", "*/",
 		HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS
 	}
@@ -407,9 +414,9 @@ failed:
 
 /* ====================== Syntax highlight color scheme  ==================== */
 
-int is_separator(int c)
+static inline int is_separator(int c)
 {
-	return c == '\0' || isspace(c) || strchr(",.()+-/*=~%[];", c) != NULL;
+	return memchr(" \t\r\n\f\v,.()+-/*=~%[];\0", c, 21) != NULL;
 }
 
 /* Return true if the specified row last char is part of a multi line comment
@@ -424,6 +431,15 @@ int editorRowHasOpenComment(erow *row)
 	return 0;
 }
 
+static int kwcmp(const char *a, const char *b)
+{
+	int n, ret;
+	if (!*b) b++;
+	n = strlen(b);
+	ret = strncmp(a, b, n);
+	return (!ret && is_separator(a[n])) ? 0 : ret;
+}
+
 /* Set every byte of row->hl (that corresponds to every character in the line)
  * to the right syntax highlight type (HL_* defines). */
 void editorUpdateSyntax(erow *row)
@@ -434,19 +450,19 @@ void editorUpdateSyntax(erow *row)
 	if (E.syntax == NULL)
 		return; /* No syntax, everything is HL_NORMAL. */
 
-	int i, prev_sep, in_string, in_comment;
+	int prev_sep, in_string, in_comment;
 	char *p;
-	char **keywords = E.syntax->keywords;
+	unsigned char *hl, *ohl;
 	char *scs = E.syntax->singleline_comment_start;
 	char *mcs = E.syntax->multiline_comment_start;
 	char *mce = E.syntax->multiline_comment_end;
 
 	/* Point to the first non-space char. */
 	p = row->render;
-	i = 0; /* Current char offset */
+	hl = row->hl;
 	while (*p && isspace(*p)) {
 		p++;
-		i++;
+		hl++;
 	}
 	prev_sep = 1; /* Tell the parser if 'i' points to start of word. */
 	in_string = 0; /* Are we inside "" or '' ? */
@@ -457,35 +473,30 @@ void editorUpdateSyntax(erow *row)
 	if (row->idx > 0 && editorRowHasOpenComment(&E.row[row->idx - 1]))
 		in_comment = 1;
 
-	while (*p) {
+	for (; *p; p += (int)(hl - ohl)) {
+		ohl = hl;
 		/* Handle // comments. */
 		if (prev_sep && *p == scs[0] && *(p + 1) == scs[1]) {
 			/* From here to end is a comment */
-			memset(row->hl + i, HL_COMMENT, row->size - i);
+			memset(hl, HL_COMMENT, row->size - (int)(hl - row->hl));
 			return;
 		}
 
 		/* Handle multi line comments. */
 		if (in_comment) {
-			row->hl[i] = HL_MLCOMMENT;
+			*hl++ = HL_MLCOMMENT;
 			if (*p == mce[0] && *(p + 1) == mce[1]) {
-				row->hl[i + 1] = HL_MLCOMMENT;
-				p += 2;
-				i += 2;
+				*hl++ = HL_MLCOMMENT;
 				in_comment = 0;
 				prev_sep = 1;
 				continue;
 			} else {
 				prev_sep = 0;
-				p++;
-				i++;
 				continue;
 			}
 		} else if (*p == mcs[0] && *(p + 1) == mcs[1]) {
-			row->hl[i] = HL_MLCOMMENT;
-			row->hl[i + 1] = HL_MLCOMMENT;
-			p += 2;
-			i += 2;
+			*hl++ = HL_MLCOMMENT;
+			*hl++ = HL_MLCOMMENT;
 			in_comment = 1;
 			prev_sep = 0;
 			continue;
@@ -493,25 +504,19 @@ void editorUpdateSyntax(erow *row)
 
 		/* Handle "" and '' */
 		if (in_string) {
-			row->hl[i] = HL_STRING;
+			*hl++ = HL_STRING;
 			if (*p == '\\') {
-				row->hl[i + 1] = HL_STRING;
-				p += 2;
-				i += 2;
+				*hl++ = HL_STRING;
 				prev_sep = 0;
 				continue;
 			}
 			if (*p == in_string)
 				in_string = 0;
-			p++;
-			i++;
 			continue;
 		} else {
 			if (*p == '"' || *p == '\'') {
 				in_string = *p;
-				row->hl[i] = HL_STRING;
-				p++;
-				i++;
+				*hl++ = HL_STRING;
 				prev_sep = 0;
 				continue;
 			}
@@ -519,42 +524,26 @@ void editorUpdateSyntax(erow *row)
 
 		/* Handle non printable chars. */
 		if (!isprint(*p)) {
-			row->hl[i] = HL_NONPRINT;
-			p++;
-			i++;
+			*hl++ = HL_NONPRINT;
 			prev_sep = 0;
 			continue;
 		}
 
 		/* Handle numbers */
-		if ((isdigit(*p) && (prev_sep || row->hl[i - 1] == HL_NUMBER)) ||
-		    (*p == '.' && i > 0 && row->hl[i - 1] == HL_NUMBER)) {
-			row->hl[i] = HL_NUMBER;
-			p++;
-			i++;
+		if ((isdigit(*p) && (prev_sep || hl[-1] == HL_NUMBER)) ||
+		    (*p == '.' && (int)(hl - row->hl) && hl[-1] == HL_NUMBER)) {
+			*hl++ = HL_NUMBER;
 			prev_sep = 0;
 			continue;
 		}
 
 		/* Handle keywords and lib calls */
 		if (prev_sep) {
-			int j;
-			for (j = 0; keywords[j]; j++) {
-				int klen = strlen(keywords[j]);
-				int kw2 = keywords[j][klen - 1] == '|';
-				if (kw2)
-					klen--;
-
-				if (!memcmp(p, keywords[j], klen) &&
-				    is_separator(*(p + klen))) {
-					/* Keyword */
-					memset(row->hl + i, kw2 ? HL_KEYWORD2 : HL_KEYWORD1, klen);
-					p += klen;
-					i += klen;
-					break;
-				}
-			}
-			if (keywords[j] != NULL) {
+			char **keyword = tfind(p, &E.syntax->keywords_root, (__compar_fn_t)kwcmp);
+			if (keyword) {
+				char *k = *(char **)keyword;
+				int klen = strlen((*k) ? k : k + 1);
+				hl = (unsigned char *)memset(hl, (*k) ? HL_KEYWORD1 : HL_KEYWORD2, klen) + klen;
 				prev_sep = 0;
 				continue; /* We had a keyword match */
 			}
@@ -562,8 +551,7 @@ void editorUpdateSyntax(erow *row)
 
 		/* Not special chars */
 		prev_sep = is_separator(*p);
-		p++;
-		i++;
+		hl++;
 	}
 
 	/* Propagate syntax change to the next row if the open commen
@@ -597,6 +585,13 @@ int editorSyntaxToColor(int hl)
 	}
 }
 
+static int kwcmp4sort(const char *a, const char *b)
+{
+	if (!*a) a++;
+	if (!*b) b++;
+	return strcmp(a, b);
+}
+
 /* Select the syntax highlight scheme depending on the filename,
  * setting it in the global state E.syntax. */
 void editorSelectSyntaxHighlight(char *filename)
@@ -610,6 +605,14 @@ void editorSelectSyntaxHighlight(char *filename)
 			if ((p = strstr(filename, s->filematch[i])) != NULL) {
 				if (s->filematch[i][0] != '.' || p[patlen] == '\0') {
 					E.syntax = s;
+					if (s->keywords_root == NULL) {
+						int ii;
+						for (ii = 0; s->keywords[ii]; ii++) {
+							tsearch(s->keywords[ii],
+								&s->keywords_root,
+								(__compar_fn_t)kwcmp4sort);
+						}
+					}
 					return;
 				}
 			}
@@ -1069,7 +1072,7 @@ void editorRefreshScreen(int full)
 						current_color = color;
 						abAppend(&ab, buf, clen);
 					}
-					abAppend(&ab, c, 1);				
+					abAppend(&ab, c, 1);
 					break;
 				}
 			}
@@ -1168,7 +1171,7 @@ void editorFind(int fd)
 			if (qlen != 0)
 				query[--qlen] = '\0';
 			last_match = -1;
-		} else if (c == ESC || c == ENTER) {
+		} else if (c == ESC || c == ENTRE) {
 			if (c == ESC) {
 				E.cx = saved_cx;
 				E.cy = saved_cy;
@@ -1329,7 +1332,7 @@ int editorProcessKeypress(int fd)
 
 	int c = editorReadKey(fd);
 	switch (c) {
-	case ENTER:         /* Enter */
+	case ENTRE:         /* Enter */
 		editorInsertNewline();
 		break;
 	case CTRL_C:        /* Ctrl-c */
