@@ -955,24 +955,36 @@ writeerr:
 struct abuf {
 	char *b;
 	int len;
+	int size;
 };
 
-#define ABUF_INIT {NULL,0}
+#define ABUF_INIT {NULL,0,0}
+static struct abuf ab = ABUF_INIT;
 
-void abAppend(struct abuf *ab, const char *s, int len)
+static __attribute__((__noinline__)) int abGrow(struct abuf *buf, int addition)
 {
-	char *new = realloc(ab->b, ab->len + len);
-
-	if (new == NULL)
-		return;
-	memcpy(new + ab->len, s, len);
-	ab->b = new;
-	ab->len += len;
+	int size = ((buf->len + addition) + 1023) & ~1023;
+	char *new = realloc(buf->b, size);
+	if (!new)
+		exit(1);
+	buf->b = new;
+	buf->size = size;
+	return 0;
 }
 
-void abFree(struct abuf *ab)
+static inline void abAppend(struct abuf *buf, const char *s, int len)
 {
-	free(ab->b);
+	if ((buf->len + len) > buf->size)
+		abGrow(buf, len);
+	char *p = buf->b + buf->len;
+	buf->len += len;
+	while (len-- > 0)
+		*p++ = *s++;
+}
+
+void abFree(struct abuf *buf)
+{
+	free(buf->b);
 }
 
 /* This function writes the whole screen using VT100 escape characters
@@ -987,8 +999,8 @@ void editorRefreshScreen(int full)
 	int y;
 	erow *r;
 	char buf[32];
-	struct abuf ab = ABUF_INIT;
 
+	ab.len = 0;
 	abAppend(&ab, "\x1b[?25l", 6); /* Hide cursor. */
 	if (!full) {
 		/* Jump straight to the first status row, leaving the text rows
@@ -1029,32 +1041,36 @@ void editorRefreshScreen(int full)
 				len = E.screencols;
 			char *c = r->render + E.coloff;
 			unsigned char *hl = r->hl + E.coloff;
-			int j;
-			for (j = 0; j < len; j++) {
-				if (hl[j] == HL_NONPRINT) {
-					char sym;
-					abAppend(&ab, "\x1b[7m", 4);
-					if (c[j] <= 26)
-						sym = '@' + c[j];
-					else
-						sym = '?';
-					abAppend(&ab, &sym, 1);
-					abAppend(&ab, "\x1b[0m", 4);
-				} else if (hl[j] == HL_NORMAL) {
+			char sym;
+			int color;
+
+			for (; len-- > 0; hl++, c++) {
+				switch (*hl) {
+				case HL_NORMAL:
 					if (current_color != -1) {
 						abAppend(&ab, "\x1b[39m", 5);
 						current_color = -1;
 					}
-					abAppend(&ab, c + j, 1);
-				} else {
-					int color = editorSyntaxToColor(hl[j]);
+					abAppend(&ab, c, 1);
+					break;
+				case HL_NONPRINT:
+					abAppend(&ab, "\x1b[7m", 4);
+					if (*c <= 26)
+						sym = '@' + *c;
+					else
+						sym = '?';
+					abAppend(&ab, &sym, 1);
+					abAppend(&ab, "\x1b[0m", 4);
+					break;
+				default:
+					color = editorSyntaxToColor(*hl);
 					if (color != current_color) {
-						char buf[16];
 						int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
 						current_color = color;
 						abAppend(&ab, buf, clen);
 					}
-					abAppend(&ab, c + j, 1);
+					abAppend(&ab, c, 1);				
+					break;
 				}
 			}
 		}
@@ -1103,7 +1119,7 @@ drawstatus:
 	abAppend(&ab, buf, strlen(buf));
 	abAppend(&ab, "\x1b[?25h", 6); /* Show cursor. */
 	write(STDOUT_FILENO, ab.b, ab.len);
-	abFree(&ab);
+	//abFree(&ab);
 }
 
 /* Set an editor status message, shown on the status line at the bottom of the
