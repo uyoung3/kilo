@@ -1064,33 +1064,26 @@ void editorRefreshScreen(int full)
 	}
 
 drawstatus:
-	/* Create a two rows status. First row: */
+	/* Single status line. While a status message is fresh (younger than 5
+	 * seconds) we show it; once it expires we clear it for good and fall
+	 * back to the file name and current line indicator. No reverse video,
+	 * so there is no need to pad the line out to the full width. */
 	abAppend(&ab, "\x1b[0K", 4);
-	abAppend(&ab, "\x1b[7m", 4);
-	char status[80], rstatus[80];
-	int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
-	                   E.filename, E.numrows, E.dirty ? "(modified)" : "");
-	int rlen = snprintf(rstatus, sizeof(rstatus),
-	                    "%d/%d", E.rowoff + E.cy + 1, E.numrows);
+	if (E.statusmsg[0] && time(NULL) - E.statusmsg_time >= 5)
+		E.statusmsg[0] = '\0';
+
+	char status[80];
+	int len;
+	if (E.statusmsg[0]) {
+		len = strlen(E.statusmsg);
+	} else {
+		len = snprintf(status, sizeof(status), "-%.20s - %d lines %s- %d/%d",
+		               E.filename, E.numrows, E.dirty ? "(modified) " : "",
+		               E.rowoff + E.cy + 1, E.numrows);
+	}
 	if (len > E.screencols)
 		len = E.screencols;
-	abAppend(&ab, status, len);
-	while (len < E.screencols) {
-		if (E.screencols - len == rlen) {
-			abAppend(&ab, rstatus, rlen);
-			break;
-		} else {
-			abAppend(&ab, " ", 1);
-			len++;
-		}
-	}
-	abAppend(&ab, "\x1b[0m\r\n", 6);
-
-	/* Second row depends on E.statusmsg and the status message update time. */
-	abAppend(&ab, "\x1b[0K", 4);
-	int msglen = strlen(E.statusmsg);
-	if (msglen && time(NULL) - E.statusmsg_time < 5)
-		abAppend(&ab, E.statusmsg, msglen <= E.screencols ? msglen : E.screencols);
+	abAppend(&ab, E.statusmsg[0] ? E.statusmsg : status, len);
 
 	/* Put cursor at its current position. Note that the horizontal position
 	 * at which the cursor is displayed may be different compared to 'E.cx'
@@ -1113,8 +1106,8 @@ drawstatus:
 	abFree(&ab);
 }
 
-/* Set an editor status message for the second line of the status, at the
- * end of the screen. */
+/* Set an editor status message, shown on the status line at the bottom of the
+ * screen until it is older than 5 seconds (see editorRefreshScreen). */
 void editorSetStatusMessage(const char *fmt, ...)
 {
 	va_list ap;
@@ -1397,7 +1390,7 @@ void updateWindowSize(void)
 		perror("Unable to query the screen for size (columns / rows)");
 		exit(1);
 	}
-	E.screenrows -= 2; /* Get room for status bar. */
+	E.screenrows -= 1; /* Get room for the status line. */
 }
 
 void handleSigWinCh(int unused __attribute__((unused)))
